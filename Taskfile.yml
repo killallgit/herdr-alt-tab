@@ -1,0 +1,43 @@
+version: "3"
+
+vars:
+  PLUGIN_ID: killallgit.herdr-alt-tab
+
+tasks:
+  default:
+    silent: true
+    cmds:
+      - task --list
+
+  build:
+    desc: Build the release binary Herdr runs
+    cmds:
+      - cargo build --release --locked
+
+  test:
+    desc: Run the test suite
+    cmds:
+      - cargo test --locked
+
+  fmt:
+    desc: Format the code
+    cmds:
+      - cargo fmt
+
+  check:
+    desc: Every gate that must pass before pushing
+    cmds:
+      - cargo fmt --check
+      - cargo clippy --locked --all-targets -- -D warnings
+      - task: test
+
+  link:
+    desc: Link this checkout into Herdr for development
+    preconditions:
+      - sh: command -v herdr
+        msg: herdr is not on PATH
+    cmds:
+      - task: build
+      - cmd: herdr plugin unlink {{.PLUGIN_ID}}
+        ignore_error: true
+      - herdr plugin link {{.ROOT_DIR}}

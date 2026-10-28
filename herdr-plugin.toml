@@ -1,0 +1,54 @@
+id = "killallgit.herdr-alt-tab"
+name = "Herdr Alt-Tab"
+version = "0.1.0"
+description = "Alt+Tab through panes in recently used order."
+min_herdr_version = "0.7.4"
+platforms = ["macos", "linux"]
+
+[[build]]
+command = ["cargo", "build", "--release"]
+platforms = ["macos", "linux"]
+
+[[build]]
+command = ["sh", "-c", "./target/release/herdr-alt-tab setup-keys || echo 'Could not bind the keys; run: herdr plugin action invoke killallgit.herdr-alt-tab.setup-keys'"]
+platforms = ["macos", "linux"]
+
+[[actions]]
+id = "older"
+title = "Alt-Tab: Older"
+description = "Step back through recently used panes"
+contexts = ["global", "workspace"]
+command = ["./target/release/herdr-alt-tab", "older"]
+
+[[actions]]
+id = "newer"
+title = "Alt-Tab: Newer"
+description = "Step forward through recently used panes"
+contexts = ["global", "workspace"]
+command = ["./target/release/herdr-alt-tab", "newer"]
+
+[[events]]
+on = "workspace.focused"
+command = ["./target/release/herdr-alt-tab", "track"]
+
+[[events]]
+on = "tab.focused"
+command = ["./target/release/herdr-alt-tab", "track"]
+
+[[events]]
+on = "pane.focused"
+command = ["./target/release/herdr-alt-tab", "track"]
+
+[[actions]]
+id = "setup-keys"
+title = "Alt-Tab: Bind alt+tab and alt+shift+tab"
+description = "Add the two key bindings to your Herdr config"
+contexts = ["global", "workspace"]
+command = ["./target/release/herdr-alt-tab", "setup-keys"]
+
+[[actions]]
+id = "remove-keys"
+title = "Alt-Tab: Remove the key bindings"
+description = "Remove the bindings setup-keys added"
+contexts = ["global", "workspace"]
+command = ["./target/release/herdr-alt-tab", "remove-keys"]

@@ -1,0 +1,22 @@
+[package]
+name = "herdr-alt-tab"
+version = "0.1.0"
+edition = "2024"
+description = "Alt+Tab through Herdr panes in recently used order."
+license = "MIT"
+
+[dependencies]
+anyhow = "1"
+fs2 = "0.4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+
+[dev-dependencies]
+tempfile = "3.27.0"
+toml = "0.8"
+
+[profile.release]
+lto = "fat"
+codegen-units = 1
+strip = "symbols"
