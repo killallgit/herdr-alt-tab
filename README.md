@@ -1,10 +1,10 @@
 # herdr-alt-tab
 
-Adds the ability to use alt+tab and shift+alt+tab to cycle through panes in recent order like a normal person.
+[unnecessary ci status badges]
 
-There are no options to configure.
+`<insert-ai-generated-image-of-a-terminal-with-a-purple-gradient>`
 
-You're welcome
+Adds the ability to use `alt+tab` and `shift+alt+tab` to cycle through panes in recent order like a normal person. There are no options to configure. There's no flashy picker-overlay or fuzzy-find AI b*llshit.
 
 ## Install
 
