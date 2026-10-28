@@ -12,7 +12,7 @@ Adds the ability to use `alt+tab` and `shift+alt+tab` to cycle through panes in 
 herdr plugin install killallgit/herdr-alt-tab
 ```
 
-The install automatically binds `alt+tab` and `alt+shift+tab` in your Herdr config. If that step fails or you've got a problem with this, run it yourself.
+The install downloads a prebuilt binary for your platform, and only falls back to compiling with `cargo` when there isn't one. It automatically binds `alt+tab` and `alt+shift+tab` in your Herdr config. If that step fails or you've got a problem with this, run it yourself.
 
 ```sh
 herdr plugin action invoke killallgit.herdr-alt-tab.setup-keys
