@@ -54,7 +54,22 @@ mod tests {
         let path = dir.path().join("herdr");
         std::fs::write(&path, format!("#!/bin/sh\n{script}\n")).unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        wait_until_executable(&path);
         HerdrBinary::at(path.to_str().unwrap().to_string())
+    }
+
+    // A test thread forking while the script is still open for writing makes
+    // exec fail with ETXTBSY until that child execs, so exec it until it takes.
+    fn wait_until_executable(path: &std::path::Path) {
+        const TEXT_FILE_BUSY: i32 = 26;
+        for _ in 0..200 {
+            match Command::new(path).output() {
+                Err(error) if error.raw_os_error() == Some(TEXT_FILE_BUSY) => {
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+                _ => return,
+            }
+        }
     }
 
     #[test]
@@ -84,7 +99,7 @@ mod tests {
 
         let error = herdr.send(&Request::ListPanes).unwrap_err();
 
-        assert!(matches!(error, HerdrError::MissingResult(_)));
+        assert!(matches!(error, HerdrError::MissingResult(_)), "{error:?}");
     }
 
     #[test]
