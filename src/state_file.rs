@@ -1,8 +1,6 @@
-use std::fs::{self, File, OpenOptions};
+use std::fs;
 use std::io;
 use std::path::PathBuf;
-
-use fs2::FileExt;
 
 pub struct StateFile {
     path: PathBuf,
@@ -29,17 +27,6 @@ impl StateFile {
 
     pub fn remove(&self) {
         let _ = fs::remove_file(&self.path);
-    }
-
-    pub fn lock(&self) -> io::Result<File> {
-        self.create_parent_dir()?;
-        let guard = OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .write(true)
-            .open(self.path.with_extension("lock"))?;
-        guard.lock_exclusive()?;
-        Ok(guard)
     }
 
     fn create_parent_dir(&self) -> io::Result<()> {
@@ -116,16 +103,5 @@ mod tests {
         let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
 
         assert_eq!(mode, 0o600);
-    }
-
-    #[test]
-    fn the_lock_is_free_again_once_its_handle_drops() {
-        let dir = TempDir::new().unwrap();
-        let file = state_file_in(&dir);
-        drop(file.lock().unwrap());
-
-        let relocked = file.lock();
-
-        assert!(relocked.is_ok());
     }
 }

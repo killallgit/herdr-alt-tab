@@ -1,10 +1,10 @@
-use crate::session::Direction;
+use crate::cycle::{CycleId, Direction};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
     Press(Direction),
     Track,
-    Watch { started_at: u64 },
+    Watch { cycle: CycleId },
     SetupKeys,
     RemoveKeys,
 }
@@ -20,8 +20,8 @@ impl Command {
             ["track"] => Some(Command::Track),
             ["setup-keys"] => Some(Command::SetupKeys),
             ["remove-keys"] => Some(Command::RemoveKeys),
-            ["watch", started_at] => Some(Command::Watch {
-                started_at: started_at.parse().ok()?,
+            ["watch", cycle] => Some(Command::Watch {
+                cycle: cycle.parse().ok()?,
             }),
             _ => None,
         }
@@ -32,7 +32,7 @@ impl Command {
             Command::Press(Direction::Older) => vec!["older".into()],
             Command::Press(Direction::Newer) => vec!["newer".into()],
             Command::Track => vec!["track".into()],
-            Command::Watch { started_at } => vec!["watch".into(), started_at.to_string()],
+            Command::Watch { cycle } => vec!["watch".into(), cycle.to_string()],
             Command::SetupKeys => vec!["setup-keys".into()],
             Command::RemoveKeys => vec!["remove-keys".into()],
         }
@@ -49,7 +49,9 @@ mod tests {
             Command::Press(Direction::Older),
             Command::Press(Direction::Newer),
             Command::Track,
-            Command::Watch { started_at: 42 },
+            Command::Watch {
+                cycle: "42".parse().unwrap(),
+            },
             Command::SetupKeys,
             Command::RemoveKeys,
         ];

@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 
-use crate::herdr_env;
+use crate::environment::Environment;
+use crate::lock::Lock;
 use crate::state_file::StateFile;
 
 pub struct Connection {
@@ -16,24 +17,28 @@ impl Connection {
         }
     }
 
-    pub fn from_env() -> Self {
-        let state_dir = std::env::var_os("HERDR_PLUGIN_STATE_DIR")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| std::env::temp_dir().join("herdr-alt-tab"));
-        Self::new(state_dir, herdr_env::var("HERDR_SOCKET_PATH"))
-    }
-
-    pub fn socket_path(&self) -> Option<&str> {
-        self.socket_path.as_deref()
+    pub fn from_environment(environment: &Environment) -> Self {
+        Self::new(
+            environment.state_dir.clone(),
+            environment.socket_path.clone(),
+        )
     }
 
     // Pane ids mean nothing across Herdr instances, so each keeps its own state.
     pub fn state_file(&self, stem: &str) -> StateFile {
+        StateFile::at(self.path_of(stem, "json"))
+    }
+
+    pub fn lock(&self, stem: &str) -> Lock {
+        Lock::at(self.path_of(stem, "lock"))
+    }
+
+    fn path_of(&self, stem: &str, extension: &str) -> PathBuf {
         let file_name = match &self.socket_path {
-            Some(socket) => format!("{stem}-{:016x}.json", fnv1a(socket)),
-            None => format!("{stem}.json"),
+            Some(socket) => format!("{stem}-{:016x}.{extension}", fnv1a(socket)),
+            None => format!("{stem}.{extension}"),
         };
-        StateFile::at(self.state_dir.join(file_name))
+        self.state_dir.join(file_name)
     }
 }
 
@@ -86,9 +91,9 @@ mod tests {
         let connection = connection(&dir, "/run/a.sock");
         connection.state_file("history").write("history").unwrap();
 
-        let session = connection.state_file("session").read();
+        let cycle_state = connection.state_file("cycle").read();
 
-        assert_eq!(session, None);
+        assert_eq!(cycle_state, None);
     }
 
     #[test]

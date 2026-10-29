@@ -1,28 +1,18 @@
 use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
+use std::fs::OpenOptions;
+use std::path::PathBuf;
 
+use fs2::FileExt;
 use tempfile::TempDir;
 
 use crate::clock::Clock;
 use crate::connection::Connection;
-use crate::cycler::Cycler;
+use crate::cycle::{Collaborators, Cycle, CycleId, Direction};
 use crate::herdr::{Herdr, HerdrError, Pane, Panes};
 use crate::history::History;
 use crate::keyboard::Keyboard;
 use crate::release::ReleaseWatcher;
-use crate::session::{Direction, Session, Sighting};
-use crate::session_store::SessionStore;
-use crate::track::Tracker;
-
-pub fn session_holding_alt(started_at: u64) -> Session {
-    let sighting = Sighting {
-        live_mru: vec!["A".into(), "B".into()],
-        focused_pane: Some("A".into()),
-        baseline: Vec::new(),
-        alt_held: true,
-    };
-    Session::advance(None, sighting, Direction::Older, started_at).unwrap()
-}
 
 pub struct FakeClock(Cell<u64>);
 
@@ -36,6 +26,10 @@ impl Clock for FakeClock {
     fn now_millis(&self) -> u64 {
         self.0.get()
     }
+
+    fn pause(&self, millis: u64) {
+        self.0.set(self.0.get() + millis);
+    }
 }
 
 pub struct FakeHerdr {
@@ -43,6 +37,8 @@ pub struct FakeHerdr {
     focused: RefCell<Option<String>>,
     focus_requests: RefCell<Vec<String>>,
     focus_fails: Cell<bool>,
+    lock_probe: RefCell<Option<PathBuf>>,
+    lock_held_when_asked: RefCell<Vec<bool>>,
 }
 
 impl FakeHerdr {
@@ -52,6 +48,8 @@ impl FakeHerdr {
             focused: RefCell::new(ids.first().map(|id| id.to_string())),
             focus_requests: RefCell::new(Vec::new()),
             focus_fails: Cell::new(false),
+            lock_probe: RefCell::new(None),
+            lock_held_when_asked: RefCell::new(Vec::new()),
         }
     }
 
@@ -59,25 +57,39 @@ impl FakeHerdr {
         self.panes.borrow_mut().push(pane_id.to_string());
     }
 
-    pub fn close(&self, pane_id: &str) {
-        self.panes.borrow_mut().retain(|id| id != pane_id);
-    }
-
     pub fn fail_focus(&self) {
         self.focus_fails.set(true);
+    }
+
+    pub fn allow_focus(&self) {
+        self.focus_fails.set(false);
     }
 
     pub fn focus_requests(&self) -> Vec<String> {
         self.focus_requests.borrow().clone()
     }
+
+    fn note_whether_locked(&self) {
+        if let Some(path) = self.lock_probe.borrow().as_ref() {
+            let rival = OpenOptions::new()
+                .create(true)
+                .truncate(false)
+                .write(true)
+                .open(path)
+                .unwrap();
+            self.lock_held_when_asked
+                .borrow_mut()
+                .push(rival.try_lock_exclusive().is_err());
+        }
+    }
 }
 
 impl Herdr for FakeHerdr {
     fn panes(&self) -> Result<Panes, HerdrError> {
+        self.note_whether_locked();
         let focused = self.focused.borrow();
-        Ok(Panes {
-            panes: self
-                .panes
+        Ok(Panes::new(
+            self.panes
                 .borrow()
                 .iter()
                 .map(|id| Pane {
@@ -85,7 +97,7 @@ impl Herdr for FakeHerdr {
                     focused: focused.as_deref() == Some(id),
                 })
                 .collect(),
-        })
+        ))
     }
 
     fn focus(&self, pane_id: &str) -> Result<(), HerdrError> {
@@ -129,17 +141,17 @@ impl Keyboard for FakeKeyboard {
     }
 }
 
-pub struct FakeWatcher(RefCell<Vec<u64>>);
+pub struct FakeWatcher(RefCell<Vec<CycleId>>);
 
 impl FakeWatcher {
-    pub fn started(&self) -> Vec<u64> {
+    pub fn started(&self) -> Vec<CycleId> {
         self.0.borrow().clone()
     }
 }
 
 impl ReleaseWatcher for FakeWatcher {
-    fn watch(&self, started_at: u64) -> anyhow::Result<()> {
-        self.0.borrow_mut().push(started_at);
+    fn watch(&self, cycle: CycleId) -> anyhow::Result<()> {
+        self.0.borrow_mut().push(cycle);
         Ok(())
     }
 }
@@ -151,8 +163,8 @@ pub struct Rig {
     pub keyboard: FakeKeyboard,
     pub watcher: FakeWatcher,
     pub history: History,
-    pub sessions: SessionStore,
     pub clock: FakeClock,
+    connection: Connection,
     _state_dir: TempDir,
 }
 
@@ -160,7 +172,7 @@ impl Rig {
     pub fn with_panes(panes: &[&str]) -> Self {
         let state_dir = TempDir::new().unwrap();
         let connection = Connection::new(state_dir.path().to_path_buf(), None);
-        let history = History::new(connection.state_file("history"));
+        let history = History::new(connection.state_file("history"), connection.lock("history"));
         for (age, pane_id) in panes.iter().rev().enumerate() {
             history.record(pane_id, 100 * (age as u64 + 1)).unwrap();
         }
@@ -171,46 +183,50 @@ impl Rig {
             keyboard,
             watcher: FakeWatcher(RefCell::new(Vec::new())),
             history,
-            sessions: SessionStore::new(connection.state_file("session")),
             clock: FakeClock::at(10_000),
+            connection,
             _state_dir: state_dir,
         }
     }
 
-    pub fn press(&self, direction: Direction) -> anyhow::Result<()> {
-        Cycler {
-            herdr: &self.herdr,
-            keyboard: &self.keyboard,
-            watcher: &self.watcher,
-            history: &self.history,
-            sessions: &self.sessions,
-            clock: &self.clock,
-        }
-        .press(direction)
+    pub fn cycle(&self) -> Cycle<'_> {
+        Cycle::new(
+            &self.connection,
+            Collaborators {
+                herdr: &self.herdr,
+                keyboard: &self.keyboard,
+                watcher: &self.watcher,
+                history: &self.history,
+                clock: &self.clock,
+            },
+        )
     }
 
-    pub fn tracker(&self) -> Tracker<'_> {
-        Tracker {
-            herdr: &self.herdr,
-            history: &self.history,
-            sessions: &self.sessions,
-            clock: &self.clock,
-        }
+    pub fn press(&self, direction: Direction) -> anyhow::Result<()> {
+        self.cycle().press(direction)
     }
 
     pub fn pass_time(&self, millis: u64) {
-        self.clock.0.set(self.clock.0.get() + millis);
+        self.clock.pause(millis);
     }
 
     pub fn user_focuses(&self, pane_id: &str) {
         *self.herdr.focused.borrow_mut() = Some(pane_id.to_string());
     }
 
+    /// Plays the release watcher of the cycle that last started one.
     pub fn release_alt(&self) {
-        let started_at = self.sessions.load().unwrap().started_at();
-        self.sessions
-            .mark_released(started_at, self.clock.now_millis())
-            .unwrap();
+        let id = *self.watcher.started().last().unwrap();
+        self.cycle().release(id).unwrap();
+    }
+
+    /// From now on, notes for every pane listing whether the cycle lock was held.
+    pub fn watch_cycle_lock(&self) {
+        *self.herdr.lock_probe.borrow_mut() = Some(self._state_dir.path().join("cycle.lock"));
+    }
+
+    pub fn cycle_lock_was_held_when_herdr_was_asked(&self) -> Vec<bool> {
+        self.herdr.lock_held_when_asked.borrow().clone()
     }
 
     pub fn focused_pane(&self) -> String {
@@ -218,10 +234,6 @@ impl Rig {
     }
 
     pub fn history_order(&self) -> Vec<String> {
-        self.history
-            .visits()
-            .into_iter()
-            .map(|visit| visit.pane_id)
-            .collect()
+        self.history.order()
     }
 }
