@@ -37,10 +37,15 @@ pub struct ReleaseWaiter<'a> {
 impl ReleaseWaiter<'_> {
     pub fn wait(&self, cycle: CycleId) -> anyhow::Result<()> {
         let give_up_at = self.clock.now_millis() + MAX_HOLD_MILLIS;
-        while self.keyboard.alt_held() == Some(true) && self.clock.now_millis() < give_up_at {
+        while self.clock.now_millis() < give_up_at {
+            if self.keyboard.alt_held() != Some(true) {
+                return self.cycle.release(cycle);
+            }
             self.clock.pause(POLL_MILLIS);
         }
-        self.cycle.release(cycle)
+        // Alt is still down, so the cycle is not over; it expires on its own
+        // MAX_HOLD_MILLIS after its last press.
+        Ok(())
     }
 }
 
@@ -75,7 +80,7 @@ mod tests {
     }
 
     #[test]
-    fn a_hold_that_never_ends_is_given_up_on_at_the_cap() {
+    fn a_hold_that_never_ends_is_given_up_on_at_the_cap_without_ending_the_cycle() {
         let rig = Rig::with_panes(&["A", "B", "C"]);
         rig.press(Older).unwrap();
         let keyboard = FakeKeyboard::reading(&[]);
@@ -84,7 +89,9 @@ mod tests {
         wait_for(&rig, &keyboard);
 
         let waited = rig.clock.now_millis() - started;
+        rig.press(Older).unwrap();
 
         assert_eq!(waited, MAX_HOLD_MILLIS);
+        assert_eq!(rig.focused_pane(), "C");
     }
 }

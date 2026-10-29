@@ -26,37 +26,29 @@ pub struct Collaborators<'a> {
 /// takes a turn on the saved state, and holds it until its history writes are
 /// done. The turn is always taken before History's own lock, never after.
 pub struct Cycle<'a> {
-    herdr: &'a dyn Herdr,
-    keyboard: &'a dyn Keyboard,
-    watcher: &'a dyn ReleaseWatcher,
-    history: &'a History,
-    clock: &'a dyn Clock,
+    with: Collaborators<'a>,
     store: Store,
 }
 
 impl<'a> Cycle<'a> {
     pub fn new(connection: &Connection, with: Collaborators<'a>) -> Self {
         Self {
-            herdr: with.herdr,
-            keyboard: with.keyboard,
-            watcher: with.watcher,
-            history: with.history,
-            clock: with.clock,
+            with,
             store: Store::new(connection.state_file("cycle"), connection.lock("cycle")),
         }
     }
 
     pub fn press(&self, direction: Direction) -> anyhow::Result<()> {
         let turn = self.store.begin_turn()?;
-        let now = self.clock.now_millis();
+        let now = self.with.clock.now_millis();
 
-        let panes = self.herdr.panes()?;
-        let recency = self.history.recency_of(panes.ids());
+        let panes = self.with.herdr.panes()?;
+        let recency = self.with.history.recency_of(panes.ids());
         let sighting = Sighting {
             live_mru: recency.live,
             focused_pane: panes.focused().map(|pane| pane.id.clone()),
             baseline: recency.snapshot,
-            alt_held: self.keyboard.alt_held() == Some(true),
+            alt_held: self.with.keyboard.alt_held() == Some(true),
         };
 
         let ongoing = State::ongoing(turn.load(), now);
@@ -68,14 +60,15 @@ impl<'a> Cycle<'a> {
         // Saved before focusing so the focus hook, which takes the same turn,
         // can tell the focus events that follow are ours.
         turn.save(&state)?;
-        if let Err(error) = self.herdr.focus(state.target()) {
+        if let Err(error) = self.with.herdr.focus(state.target()) {
             turn.clear();
             return Err(error.into());
         }
-        self.history
+        self.with
+            .history
             .promote_after_cycle(state.baseline(), state.target(), now)?;
         if starts_new_cycle && state.needs_release_watcher() {
-            self.watcher.watch(state.id())?;
+            self.with.watcher.watch(state.id())?;
         }
         Ok(())
     }
@@ -83,16 +76,18 @@ impl<'a> Cycle<'a> {
     // Herdr does not fire `pane.focused` for every switch, so whatever the
     // event was, the pane focused right now is recorded too.
     pub fn observe_focus(&self, announced_pane: Option<&str>) -> anyhow::Result<()> {
-        let observed_at = self.clock.now_millis();
+        let observed_at = self.with.clock.now_millis();
         let turn = self.store.begin_turn()?;
         if self.cycle_caused_focus(&turn, observed_at) {
             return Ok(());
         }
         if let Some(pane_id) = announced_pane {
-            self.history.record(pane_id, observed_at)?;
+            self.with.history.record(pane_id, observed_at)?;
         }
-        if let Some(focused) = self.herdr.panes()?.focused() {
-            self.history.record(&focused.id, self.clock.now_millis())?;
+        if let Some(focused) = self.with.herdr.panes()?.focused() {
+            self.with
+                .history
+                .record(&focused.id, self.with.clock.now_millis())?;
         }
         Ok(())
     }
@@ -101,7 +96,9 @@ impl<'a> Cycle<'a> {
     pub fn release(&self, id: CycleId) -> anyhow::Result<()> {
         let turn = self.store.begin_turn()?;
         match turn.load() {
-            Some(state) if state.id() == id => turn.save(&state.released(self.clock.now_millis())),
+            Some(state) if state.id() == id => {
+                turn.save(&state.released(self.with.clock.now_millis()))
+            }
             _ => Ok(()),
         }
     }
@@ -124,7 +121,7 @@ impl<'a> Cycle<'a> {
     // Focus that cannot be read is assumed to be the cycle's. Its events must
     // stay out of history, or the panes it only passed through would reorder.
     fn moved_focus(&self, state: &State) -> bool {
-        match self.herdr.panes() {
+        match self.with.herdr.panes() {
             Ok(panes) => panes
                 .focused()
                 .is_none_or(|pane| state.has_visited(&pane.id)),
@@ -269,6 +266,18 @@ mod tests {
         let order = rig.history_order();
 
         assert_eq!(order, ["C", "A", "B"]);
+    }
+
+    #[test]
+    fn a_focus_hook_keeps_the_cycle_lock_while_it_asks_herdr() {
+        let rig = Rig::with_panes(&["A", "B", "C"]);
+        rig.user_focuses("C");
+        rig.watch_cycle_lock();
+        rig.cycle().observe_focus(Some("C")).unwrap();
+
+        let held = rig.cycle_lock_was_held_when_herdr_was_asked();
+
+        assert!(!held.is_empty() && held.iter().all(|held| *held));
     }
 
     #[test]

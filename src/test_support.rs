@@ -1,6 +1,9 @@
 use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
+use std::fs::OpenOptions;
+use std::path::PathBuf;
 
+use fs2::FileExt;
 use tempfile::TempDir;
 
 use crate::clock::Clock;
@@ -34,6 +37,8 @@ pub struct FakeHerdr {
     focused: RefCell<Option<String>>,
     focus_requests: RefCell<Vec<String>>,
     focus_fails: Cell<bool>,
+    lock_probe: RefCell<Option<PathBuf>>,
+    lock_held_when_asked: RefCell<Vec<bool>>,
 }
 
 impl FakeHerdr {
@@ -43,6 +48,8 @@ impl FakeHerdr {
             focused: RefCell::new(ids.first().map(|id| id.to_string())),
             focus_requests: RefCell::new(Vec::new()),
             focus_fails: Cell::new(false),
+            lock_probe: RefCell::new(None),
+            lock_held_when_asked: RefCell::new(Vec::new()),
         }
     }
 
@@ -61,10 +68,25 @@ impl FakeHerdr {
     pub fn focus_requests(&self) -> Vec<String> {
         self.focus_requests.borrow().clone()
     }
+
+    fn note_whether_locked(&self) {
+        if let Some(path) = self.lock_probe.borrow().as_ref() {
+            let rival = OpenOptions::new()
+                .create(true)
+                .truncate(false)
+                .write(true)
+                .open(path)
+                .unwrap();
+            self.lock_held_when_asked
+                .borrow_mut()
+                .push(rival.try_lock_exclusive().is_err());
+        }
+    }
 }
 
 impl Herdr for FakeHerdr {
     fn panes(&self) -> Result<Panes, HerdrError> {
+        self.note_whether_locked();
         let focused = self.focused.borrow();
         Ok(Panes::new(
             self.panes
@@ -196,6 +218,15 @@ impl Rig {
     pub fn release_alt(&self) {
         let id = *self.watcher.started().last().unwrap();
         self.cycle().release(id).unwrap();
+    }
+
+    /// From now on, notes for every pane listing whether the cycle lock was held.
+    pub fn watch_cycle_lock(&self) {
+        *self.herdr.lock_probe.borrow_mut() = Some(self._state_dir.path().join("cycle.lock"));
+    }
+
+    pub fn cycle_lock_was_held_when_herdr_was_asked(&self) -> Vec<bool> {
+        self.herdr.lock_held_when_asked.borrow().clone()
     }
 
     pub fn focused_pane(&self) -> String {
