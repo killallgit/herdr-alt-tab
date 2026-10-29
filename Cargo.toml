@@ -1,6 +1,6 @@
 [package]
 name = "herdr-alt-tab"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 description = "Alt+Tab through Herdr panes in recently used order."
 license = "MIT"

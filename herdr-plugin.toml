@@ -1,6 +1,6 @@
 id = "killallgit.herdr-alt-tab"
 name = "Herdr Alt-Tab"
-version = "0.1.0"
+version = "0.1.1"
 description = "Alt+Tab through panes in recently used order like a l33t hackr! There are no options. There is nothing to configure."
 min_herdr_version = "0.7.4"
 platforms = ["macos", "linux"]
