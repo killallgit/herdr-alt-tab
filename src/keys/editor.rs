@@ -2,9 +2,10 @@ use std::io;
 use std::path::PathBuf;
 
 use super::block::{with_bindings, without_bindings};
-use super::config_path;
-use super::live_config::LiveConfig;
 use crate::connection::Connection;
+use crate::environment::Environment;
+use crate::herdr::LiveConfig;
+use crate::lock::Lock;
 use crate::state_file::StateFile;
 
 #[derive(Debug, thiserror::Error)]
@@ -21,18 +22,22 @@ pub enum KeysError {
 
 pub struct ConfigEditor<'a> {
     config_path: PathBuf,
-    lock: StateFile,
+    lock: Lock,
     herdr: &'a dyn LiveConfig,
 }
 
 impl<'a> ConfigEditor<'a> {
-    pub fn for_connection(
+    pub fn new(
+        environment: &Environment,
         connection: &Connection,
         herdr: &'a dyn LiveConfig,
     ) -> Result<Self, KeysError> {
         Ok(Self {
-            config_path: config_path::from_env().ok_or(KeysError::ConfigPathUnknown)?,
-            lock: connection.state_file("keys"),
+            config_path: environment
+                .config_path
+                .clone()
+                .ok_or(KeysError::ConfigPathUnknown)?,
+            lock: connection.lock("keys"),
             herdr,
         })
     }
@@ -47,7 +52,7 @@ impl<'a> ConfigEditor<'a> {
 
     // Writes through a symlinked config, and puts the original back if Herdr rejects the result.
     fn rewrite(&self, transform: fn(&str) -> String) -> Result<(), KeysError> {
-        let _turn = self.lock.lock()?;
+        let _turn = self.lock.acquire()?;
         let config = StateFile::at(
             std::fs::canonicalize(&self.config_path).unwrap_or_else(|_| self.config_path.clone()),
         );
@@ -76,8 +81,8 @@ impl<'a> ConfigEditor<'a> {
 
 #[cfg(test)]
 mod tests {
-    use super::super::live_config::CheckFailed;
     use super::*;
+    use crate::herdr::CheckFailed;
     use std::cell::Cell;
     use std::fs;
     use std::path::Path;
@@ -125,7 +130,7 @@ mod tests {
     fn editor<'a>(dir: &TempDir, config: &Path, herdr: &'a FakeLiveConfig) -> ConfigEditor<'a> {
         ConfigEditor {
             config_path: config.to_path_buf(),
-            lock: StateFile::at(dir.path().join("state").join("keys.json")),
+            lock: Lock::at(dir.path().join("state").join("keys.lock")),
             herdr,
         }
     }

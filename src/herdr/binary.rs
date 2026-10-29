@@ -2,23 +2,18 @@ use std::process::Command;
 
 use serde_json::Value;
 
-use super::{HerdrError, Request, Transport};
-use crate::herdr_env;
+use super::{CheckFailed, HerdrError, LiveConfig, Request, Transport};
 
 pub struct HerdrBinary {
     path: String,
 }
 
 impl HerdrBinary {
-    pub fn from_env() -> Self {
-        Self::at(herdr_env::var("HERDR_BIN_PATH").unwrap_or_else(|| "herdr".to_string()))
-    }
-
-    fn at(path: String) -> Self {
+    pub(super) fn at(path: String) -> Self {
         Self { path }
     }
 
-    pub fn run(&self, args: &[&str]) -> Result<String, HerdrError> {
+    fn run(&self, args: &[&str]) -> Result<String, HerdrError> {
         let output = Command::new(&self.path).args(args).output()?;
         if !output.status.success() {
             return Err(HerdrError::Rejected {
@@ -41,6 +36,19 @@ impl Transport for HerdrBinary {
             .get_mut("result")
             .map(Value::take)
             .ok_or_else(|| HerdrError::MissingResult(format!("herdr {}", args.join(" "))))
+    }
+}
+
+impl LiveConfig for HerdrBinary {
+    fn check(&self) -> Result<(), CheckFailed> {
+        self.run(&["config", "check"])
+            .map(drop)
+            .map_err(|_| CheckFailed)
+    }
+
+    fn reload(&self) {
+        // Without a running Herdr the keys are live from its next start.
+        let _ = self.run(&["server", "reload-config"]);
     }
 }
 
@@ -119,5 +127,35 @@ mod tests {
         let error = herdr.send(&Request::ListPanes).unwrap_err();
 
         assert!(matches!(error, HerdrError::Io(_)));
+    }
+
+    #[test]
+    fn a_config_check_passes_when_herdr_exits_cleanly() {
+        let dir = TempDir::new().unwrap();
+        let herdr = herdr_running(&dir, "exit 0");
+
+        assert!(herdr.check().is_ok());
+    }
+
+    #[test]
+    fn a_config_check_fails_when_herdr_exits_with_an_error() {
+        let dir = TempDir::new().unwrap();
+        let herdr = herdr_running(&dir, "echo bad config >&2; exit 1");
+
+        assert!(herdr.check().is_err());
+    }
+
+    #[test]
+    fn a_reload_is_asked_for_and_a_failed_one_is_ignored() {
+        let dir = TempDir::new().unwrap();
+        let log = dir.path().join("args");
+        let herdr = herdr_running(&dir, &format!("echo \"$@\" > {}; exit 1", log.display()));
+
+        herdr.reload();
+
+        assert_eq!(
+            std::fs::read_to_string(log).unwrap().trim(),
+            "server reload-config"
+        );
     }
 }

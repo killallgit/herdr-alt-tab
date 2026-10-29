@@ -1,4 +1,4 @@
-pub mod binary;
+mod binary;
 mod socket;
 
 use std::io;
@@ -6,7 +6,7 @@ use std::io;
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
 
-use crate::connection::Connection;
+use crate::environment::Environment;
 use binary::HerdrBinary;
 use socket::Socket;
 
@@ -33,16 +33,17 @@ pub struct Pane {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct Panes {
-    pub(crate) panes: Vec<Pane>,
+    panes: Vec<Pane>,
 }
 
 impl Panes {
-    pub fn focused(&self) -> Option<&Pane> {
-        self.panes.iter().find(|pane| pane.focused)
+    #[cfg(test)]
+    pub fn new(panes: Vec<Pane>) -> Self {
+        Self { panes }
     }
 
-    pub fn contains(&self, pane_id: &str) -> bool {
-        self.panes.iter().any(|pane| pane.id == pane_id)
+    pub fn focused(&self) -> Option<&Pane> {
+        self.panes.iter().find(|pane| pane.focused)
     }
 
     pub fn ids(&self) -> impl Iterator<Item = &str> {
@@ -53,6 +54,16 @@ impl Panes {
 pub trait Herdr {
     fn panes(&self) -> Result<Panes, HerdrError>;
     fn focus(&self, pane_id: &str) -> Result<(), HerdrError>;
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("`herdr config check` did not pass")]
+pub struct CheckFailed;
+
+/// The config as the running Herdr sees it.
+pub trait LiveConfig {
+    fn check(&self) -> Result<(), CheckFailed>;
+    fn reload(&self);
 }
 
 enum Request<'a> {
@@ -99,11 +110,16 @@ impl<P: Transport, S: Transport> Herdr for Fallback<P, S> {
     }
 }
 
+/// Only the binary can check and reload the config.
+pub fn live_config(environment: &Environment) -> impl LiveConfig {
+    HerdrBinary::at(environment.herdr_bin.clone())
+}
+
 /// The socket is faster; the binary answers when the socket cannot.
-pub fn connect(connection: &Connection) -> impl Herdr {
+pub fn connect(environment: &Environment) -> impl Herdr {
     Fallback {
-        primary: connection.socket_path().map(Socket::at),
-        secondary: HerdrBinary::from_env(),
+        primary: environment.socket_path.as_deref().map(Socket::at),
+        secondary: HerdrBinary::at(environment.herdr_bin.clone()),
     }
 }
 
@@ -167,24 +183,6 @@ mod tests {
         let focused = panes.focused().map(|pane| pane.id.as_str());
 
         assert_eq!(focused, Some("p2"));
-    }
-
-    #[test]
-    fn panes_contain_the_ids_they_list() {
-        let panes = two_panes_focused_on_the_second();
-
-        let contains = panes.contains("p1");
-
-        assert!(contains);
-    }
-
-    #[test]
-    fn panes_do_not_contain_other_ids() {
-        let panes = two_panes_focused_on_the_second();
-
-        let contains = panes.contains("p3");
-
-        assert!(!contains);
     }
 
     #[test]

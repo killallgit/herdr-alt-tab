@@ -2,6 +2,7 @@ use std::cmp::Reverse;
 
 use serde::{Deserialize, Serialize};
 
+use crate::lock::Lock;
 use crate::state_file::StateFile;
 
 const MAX_VISITS: usize = 300;
@@ -9,21 +10,32 @@ const MAX_VISITS: usize = 300;
 const MAX_HOOK_LAG_MILLIS: u64 = 60_000;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Visit {
-    pub pane_id: String,
-    pub focused_at: u64,
+struct Visit {
+    pane_id: String,
+    focused_at: u64,
+}
+
+/// What history looked like when a cycle began.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct Snapshot(Vec<Visit>);
+
+pub struct Recency {
+    /// Live panes, most recently focused first; never-focused panes come last.
+    pub live: Vec<String>,
+    pub snapshot: Snapshot,
 }
 
 pub struct History {
     file: StateFile,
+    lock: Lock,
 }
 
 impl History {
-    pub fn new(file: StateFile) -> Self {
-        Self { file }
+    pub fn new(file: StateFile, lock: Lock) -> Self {
+        Self { file, lock }
     }
 
-    pub fn visits(&self) -> Vec<Visit> {
+    fn visits(&self) -> Vec<Visit> {
         let mut visits: Vec<Visit> = self
             .file
             .read()
@@ -33,10 +45,38 @@ impl History {
         visits
     }
 
+    pub fn recency_of<'a>(&self, live: impl IntoIterator<Item = &'a str>) -> Recency {
+        let visits = self.visits();
+        let live: Vec<&str> = live.into_iter().collect();
+        let mut by_recency: Vec<String> = visits
+            .iter()
+            .map(|visit| visit.pane_id.clone())
+            .filter(|pane_id| live.contains(&pane_id.as_str()))
+            .collect();
+        let never_focused: Vec<String> = live
+            .iter()
+            .filter(|pane_id| !by_recency.iter().any(|known| known == *pane_id))
+            .map(|pane_id| pane_id.to_string())
+            .collect();
+        by_recency.extend(never_focused);
+        Recency {
+            live: by_recency,
+            snapshot: Snapshot(visits),
+        }
+    }
+
+    #[cfg(test)]
+    pub fn order(&self) -> Vec<String> {
+        self.visits()
+            .into_iter()
+            .map(|visit| visit.pane_id)
+            .collect()
+    }
+
     // Hooks run concurrently and finish out of order, so `observed_at` decides
     // where the pane lands, not the order in which hooks get here.
     pub fn record(&self, pane_id: &str, observed_at: u64) -> anyhow::Result<()> {
-        let _turn = self.file.lock()?;
+        let _turn = self.lock.acquire()?;
         let mut visits = self.visits();
         let observed_at = unless_clock_stepped_back(observed_at, &visits);
         if has_later_visit(&visits, pane_id, observed_at) {
@@ -58,14 +98,14 @@ impl History {
     /// was taken, however many panes a cycle passed through on the way.
     pub fn promote_after_cycle(
         &self,
-        baseline: &[Visit],
+        baseline: &Snapshot,
         promoted: &str,
         promoted_at: u64,
     ) -> anyhow::Result<()> {
-        let _turn = self.file.lock()?;
+        let _turn = self.lock.acquire()?;
         let mut visits = self.visits();
         for visit in &mut visits {
-            if let Some(before) = baseline.iter().find(|b| b.pane_id == visit.pane_id) {
+            if let Some(before) = baseline.0.iter().find(|b| b.pane_id == visit.pane_id) {
                 visit.focused_at = before.focused_at;
             }
         }
@@ -116,7 +156,10 @@ mod tests {
     use tempfile::TempDir;
 
     fn history_in(dir: &TempDir) -> History {
-        History::new(StateFile::at(dir.path().join("history.json")))
+        History::new(
+            StateFile::at(dir.path().join("history.json")),
+            Lock::at(dir.path().join("history.lock")),
+        )
     }
 
     fn pane_ids(history: &History) -> Vec<String> {
@@ -237,7 +280,7 @@ mod tests {
             r#"[{"pane_id":"B","focused_at":1},{"pane_id":"C","focused_at":3},{"pane_id":"A","focused_at":0}]"#,
         )
         .unwrap();
-        let history = History::new(file);
+        let history = History::new(file, Lock::at(dir.path().join("history.lock")));
         history.record("D", 2).unwrap();
 
         let order = pane_ids(&history);
@@ -264,7 +307,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let file = StateFile::at(dir.path().join("history.json"));
         file.write("{{{").unwrap();
-        let history = History::new(file);
+        let history = History::new(file, Lock::at(dir.path().join("history.lock")));
 
         let visits = history.visits();
 
@@ -283,7 +326,7 @@ mod tests {
     fn panes_a_cycle_passed_through_keep_their_original_order() {
         let dir = TempDir::new().unwrap();
         let history = history_of_three(&dir);
-        let baseline = history.visits();
+        let baseline = history.recency_of([]).snapshot;
         history.promote_after_cycle(&baseline, "B", 100).unwrap();
         history.promote_after_cycle(&baseline, "A", 200).unwrap();
 
@@ -299,7 +342,7 @@ mod tests {
         let now = 10_000_000;
         history.record("A", now).unwrap();
         history.record("B", now - 1).unwrap();
-        let baseline = history.visits();
+        let baseline = history.recency_of([]).snapshot;
         history
             .promote_after_cycle(&baseline, "B", now - 5_000_000)
             .unwrap();
@@ -313,11 +356,24 @@ mod tests {
     fn promoting_a_pane_with_no_history_adds_it_at_the_front() {
         let dir = TempDir::new().unwrap();
         let history = history_of_three(&dir);
-        let baseline = history.visits();
+        let baseline = history.recency_of([]).snapshot;
         history.promote_after_cycle(&baseline, "X", 100).unwrap();
 
         let order = pane_ids(&history);
 
         assert_eq!(order, ["X", "C", "B", "A"]);
+    }
+
+    #[test]
+    fn live_panes_come_newest_first_with_never_focused_ones_last() {
+        let dir = TempDir::new().unwrap();
+        let history = history_in(&dir);
+        history.record("A", 1).unwrap();
+        history.record("B", 2).unwrap();
+        history.record("closed", 3).unwrap();
+
+        let recency = history.recency_of(["new", "A", "B"]);
+
+        assert_eq!(recency.live, ["B", "A", "new"]);
     }
 }
